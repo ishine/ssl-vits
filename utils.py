@@ -5,6 +5,8 @@ import argparse
 import logging
 import json
 import subprocess
+
+import librosa
 import numpy as np
 from scipy.io.wavfile import read
 import torch
@@ -36,7 +38,6 @@ def load_checkpoint(checkpoint_path, model, optimizer=None, skip_optimizer=False
             assert saved_state_dict[k].shape == v.shape, (saved_state_dict[k].shape, v.shape)
         except:
             print("error, %s is not in the checkpoint" % k)
-            logger.info("%s is not in the checkpoint" % k)
             new_state_dict[k] = v
     if hasattr(model, 'module'):
         model.module.load_state_dict(new_state_dict)
@@ -156,6 +157,9 @@ def plot_alignment_to_numpy(alignment, info=None):
     plt.close()
     return data
 
+def load_wav_to_torch_and_resample(path, sampling_rate):
+    wav, sr =librosa.load(path,sr=sampling_rate)
+    return torch.FloatTensor(wav)
 
 def load_wav_to_torch(full_path):
     sampling_rate, data = read(full_path)
