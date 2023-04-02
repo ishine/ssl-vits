@@ -131,8 +131,7 @@ def run(rank, n_gpus, hps):
 
 def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loaders, logger, writers):
     net_g, ssl2wav_model = nets
-    optim_g = optims
-    scheduler_g = schedulers
+    optim_g = optims[0]
     train_loader, eval_loader = loaders
     if writers is not None:
         writer, writer_eval = writers
@@ -154,7 +153,7 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
             # Generator
             with autocast(enabled=False):
                 loss_dur = torch.sum(l_length.float())
-                loss_ssl = F.mse_loss(y_hat, ssl_content) * hps.train.c_ssl
+                loss_ssl = F.l1_loss(y_hat, ssl_content) * hps.train.c_ssl
                 loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, z_mask) * hps.train.c_kl
 
                 loss_gen_all = loss_ssl + loss_dur + loss_kl
@@ -193,7 +192,7 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
                     scalars=scalar_dict)
 
             if global_step % hps.train.eval_interval == 0:
-                evaluate(hps, net_g, eval_loader, writer_eval, ssl2wav_model)
+                evaluate(hps, net_g, eval_loader, writer_eval, ssl2wav_model,y_hat)
                 utils.save_checkpoint(net_g, optim_g, hps.train.learning_rate, epoch,
                                       os.path.join(hps.model_dir, "G_{}.pth".format(global_step)))
                 keep_ckpts = getattr(hps.train, 'keep_ckpts', 0)
@@ -206,11 +205,16 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
         logger.info('====> Epoch: {}'.format(epoch))
 
 
-def evaluate(hps, generator, eval_loader, writer_eval, ssl2wav_model):
+def evaluate(hps, generator, eval_loader, writer_eval, ssl2wav_model, train_rec):
     generator.eval()
     image_dict = {}
     audio_dict = {}
     with torch.no_grad():
+        y_train_rec, sr = ssl2wav.ssl2wav(hps.data.ssl2wav_model_name, ssl2wav_model, train_rec.detach()[:1, :, :],
+                                          None)
+        audio_dict.update({
+            f"gen/audio_tr_rec": y_train_rec
+        })
         for batch_idx,  (x, x_lengths,lang, ssl_content, ssl_lengths, speakers) in enumerate(eval_loader):
             x, x_lengths = x.cuda(0), x_lengths.cuda(0)
             ssl_content, ssl_lengths = ssl_content.cuda(0), ssl_lengths.cuda(0)
@@ -229,11 +233,11 @@ def evaluate(hps, generator, eval_loader, writer_eval, ssl2wav_model):
             # image_dict.update({
             #     f"gen/mel_{batch_idx}": utils.plot_spectrogram_to_numpy(y_hat_mel[0].cpu().numpy())
             # })
-            y_hat = ssl2wav.ssl2wav(hps.data.ssl2wav_model_name, ssl2wav_model, ssl_pred, speakers)
+            y_hat, sr = ssl2wav.ssl2wav(hps.data.ssl2wav_model_name, ssl2wav_model, ssl_pred, speakers)
             audio_dict.update({
                 f"gen/audio_{batch_idx}": y_hat
             })
-            y_rec = ssl2wav.ssl2wav(hps.data.ssl2wav_model_name, ssl2wav_model, ssl_content, speakers)
+            y_rec, sr = ssl2wav.ssl2wav(hps.data.ssl2wav_model_name, ssl2wav_model, ssl_content, speakers)
             # image_dict.update({f"gt/mel_{batch_idx}": utils.plot_spectrogram_to_numpy(mel[0].cpu().numpy())})
             audio_dict.update({f"rec/audio_{batch_idx}": y_rec})
 
@@ -243,7 +247,7 @@ def evaluate(hps, generator, eval_loader, writer_eval, ssl2wav_model):
         global_step=global_step,
         images=image_dict,
         audios=audio_dict,
-        audio_sampling_rate=hps.data.sampling_rate
+        audio_sampling_rate=sr
     )
     generator.train()
 
