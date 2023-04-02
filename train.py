@@ -16,6 +16,8 @@ from torch.cuda.amp import autocast, GradScaler
 import librosa
 import logging
 
+import ssl2wav
+
 logging.getLogger('numba').setLevel(logging.WARNING)
 
 import commons
@@ -90,26 +92,19 @@ def run(rank, n_gpus, hps):
         hps.train.segment_size // hps.data.hop_length,
         n_speakers=hps.data.n_speakers,
         **hps.model).cuda(rank)
-    net_d = MultiPeriodDiscriminator(hps.model.use_spectral_norm).cuda(rank)
     optim_g = torch.optim.AdamW(
         net_g.parameters(),
         hps.train.learning_rate,
         betas=hps.train.betas,
         eps=hps.train.eps)
-    optim_d = torch.optim.AdamW(
-        net_d.parameters(),
-        hps.train.learning_rate,
-        betas=hps.train.betas,
-        eps=hps.train.eps)
+
     net_g = DDP(net_g, device_ids=[rank])
-    net_d = DDP(net_d, device_ids=[rank])
+    ssl2wav_model = ssl2wav.get_model(hps.data.ssl2wav_model_name).cuda(0)
 
     skip_optimizer = True
     try:
         _, _, _, epoch_str = utils.load_checkpoint(utils.latest_checkpoint_path(hps.model_dir, "G_*.pth"), net_g,
                                                    optim_g, skip_optimizer)
-        _, _, _, epoch_str = utils.load_checkpoint(utils.latest_checkpoint_path(hps.model_dir, "D_*.pth"), net_d,
-                                                   optim_d, skip_optimizer)
         epoch_str = max(epoch_str, 1)
         global_step = (epoch_str - 1) * len(train_loader)
     except:
@@ -121,25 +116,23 @@ def run(rank, n_gpus, hps):
         global_step = 0
 
     scheduler_g = torch.optim.lr_scheduler.ExponentialLR(optim_g, gamma=hps.train.lr_decay, last_epoch=epoch_str - 2)
-    scheduler_d = torch.optim.lr_scheduler.ExponentialLR(optim_d, gamma=hps.train.lr_decay, last_epoch=epoch_str - 2)
 
     scaler = GradScaler(enabled=hps.train.fp16_run)
 
     for epoch in range(epoch_str, hps.train.epochs + 1):
         if rank == 0:
-            train_and_evaluate(rank, epoch, hps, [net_g, net_d], [optim_g, optim_d], [scheduler_g, scheduler_d], scaler,
+            train_and_evaluate(rank, epoch, hps, [net_g, ssl2wav_model], [optim_g], [scheduler_g], scaler,
                                [train_loader, eval_loader], logger, [writer, writer_eval])
         else:
-            train_and_evaluate(rank, epoch, hps, [net_g, net_d], [optim_g, optim_d], [scheduler_g, scheduler_d], scaler,
+            train_and_evaluate(rank, epoch, hps, [net_g, None], [optim_g], [scheduler_g], scaler,
                                [train_loader, None], None, None)
         scheduler_g.step()
-        scheduler_d.step()
 
 
 def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loaders, logger, writers):
-    net_g, net_d = nets
-    optim_g, optim_d = optims
-    scheduler_g, scheduler_d = schedulers
+    net_g, ssl2wav_model = nets
+    optim_g = optims
+    scheduler_g = schedulers
     train_loader, eval_loader = loaders
     if writers is not None:
         writer, writer_eval = writers
@@ -148,62 +141,23 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
     global global_step
 
     net_g.train()
-    net_d.train()
-    for batch_idx, (x, x_lengths,lang, spec, spec_lengths, y, y_lengths, speakers, emo) in enumerate(train_loader):
+    for batch_idx, (x, x_lengths,lang, ssl_content, ssl_lengths, speakers) in enumerate(train_loader):
         x, x_lengths = x.cuda(rank, non_blocking=True), x_lengths.cuda(rank, non_blocking=True)
-        spec, spec_lengths = spec.cuda(rank, non_blocking=True), spec_lengths.cuda(rank, non_blocking=True)
-        y, y_lengths = y.cuda(rank, non_blocking=True), y_lengths.cuda(rank, non_blocking=True)
+        ssl_content, ssl_lengths = ssl_content.cuda(rank, non_blocking=True), ssl_lengths.cuda(rank, non_blocking=True)
         speakers = speakers.cuda(rank, non_blocking=True)
         lang = lang.cuda(rank, non_blocking=True)
-        emo = emo.cuda(rank, non_blocking=True)
 
         with autocast(enabled=hps.train.fp16_run):
-            y_hat, l_length, attn, ids_slice, x_mask, z_mask, \
-            (z, z_p, m_p, logs_p, m_q, logs_q), gst_predict_loss= net_g(x, x_lengths, lang, spec, spec_lengths, speakers, emo)
+            y_hat, l_length, attn, x_mask, z_mask, \
+            (z, z_p, m_p, logs_p, m_q, logs_q) = net_g(x, x_lengths, lang, ssl_content, ssl_lengths, speakers)
 
-            mel = spec_to_mel_torch(
-                spec,
-                hps.data.filter_length,
-                hps.data.n_mel_channels,
-                hps.data.sampling_rate,
-                hps.data.mel_fmin,
-                hps.data.mel_fmax)
-            y_mel = commons.slice_segments(mel, ids_slice, hps.train.segment_size // hps.data.hop_length)
-            y_hat_mel = mel_spectrogram_torch(
-                y_hat.squeeze(1),
-                hps.data.filter_length,
-                hps.data.n_mel_channels,
-                hps.data.sampling_rate,
-                hps.data.hop_length,
-                hps.data.win_length,
-                hps.data.mel_fmin,
-                hps.data.mel_fmax
-            )
-
-            y = commons.slice_segments(y, ids_slice * hps.data.hop_length, hps.train.segment_size)  # slice
-
-            # Discriminator
-            y_d_hat_r, y_d_hat_g, _, _ = net_d(y, y_hat.detach())
-            with autocast(enabled=False):
-                loss_disc, losses_disc_r, losses_disc_g = discriminator_loss(y_d_hat_r, y_d_hat_g)
-                loss_disc_all = loss_disc
-        optim_d.zero_grad()
-        scaler.scale(loss_disc_all).backward()
-        scaler.unscale_(optim_d)
-        grad_norm_d = commons.clip_grad_value_(net_d.parameters(), None)
-        scaler.step(optim_d)
-
-        with autocast(enabled=hps.train.fp16_run):
             # Generator
-            y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = net_d(y, y_hat)
             with autocast(enabled=False):
                 loss_dur = torch.sum(l_length.float())
-                loss_mel = F.l1_loss(y_mel, y_hat_mel) * hps.train.c_mel
+                loss_ssl = F.mse_loss(y_hat, ssl_content) * hps.train.c_ssl
                 loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, z_mask) * hps.train.c_kl
 
-                loss_fm = feature_loss(fmap_r, fmap_g)
-                loss_gen, losses_gen = generator_loss(y_d_hat_g)
-                loss_gen_all = loss_gen + loss_fm + loss_mel + loss_dur + loss_kl + gst_predict_loss
+                loss_gen_all = loss_ssl + loss_dur + loss_kl
         optim_g.zero_grad()
         scaler.scale(loss_gen_all).backward()
         scaler.unscale_(optim_g)
@@ -214,23 +168,22 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
         if rank == 0:
             if global_step % hps.train.log_interval == 0:
                 lr = optim_g.param_groups[0]['lr']
-                losses = [loss_disc, loss_gen, loss_fm, loss_mel, loss_dur, loss_kl]
+                losses = [loss_ssl, loss_dur, loss_kl]
                 logger.info('Train Epoch: {} [{:.0f}%]'.format(
                     epoch,
                     100. * batch_idx / len(train_loader)))
                 logger.info([x.item() for x in losses] + [global_step, lr])
 
-                scalar_dict = {"loss/g/total": loss_gen_all, "loss/d/total": loss_disc_all, "learning_rate": lr,
-                               "grad_norm_d": grad_norm_d, "grad_norm_g": grad_norm_g}
+                scalar_dict = {"loss/g/total": loss_gen_all, "learning_rate": lr,
+                               "grad_norm_g": grad_norm_g}
                 scalar_dict.update(
-                    {"loss/g/fm": loss_fm, "loss/g/mel": loss_mel, "loss/g/dur": loss_dur,
-                     "loss/g/kl": loss_kl, "loss/g/gst_predict_loss": gst_predict_loss})
+                    { "loss/g/ssl": loss_ssl, "loss/g/dur": loss_dur,
+                     "loss/g/kl": loss_kl})
 
 
                 image_dict = {
-                    "slice/mel_org": utils.plot_spectrogram_to_numpy(y_mel[0].data.cpu().numpy()),
-                    "slice/mel_gen": utils.plot_spectrogram_to_numpy(y_hat_mel[0].data.cpu().numpy()),
-                    "all/mel": utils.plot_spectrogram_to_numpy(mel[0].data.cpu().numpy()),
+                    "all/ssl_org": utils.plot_spectrogram_to_numpy(ssl_content[0].data.cpu().numpy()),
+                    "all/ssl_gen": utils.plot_spectrogram_to_numpy(y_hat[0].data.cpu().numpy()),
                     "all/attn": utils.plot_alignment_to_numpy(attn[0, 0].data.cpu().numpy())
                 }
                 utils.summarize(
@@ -240,11 +193,9 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
                     scalars=scalar_dict)
 
             if global_step % hps.train.eval_interval == 0:
-                evaluate(hps, net_g, eval_loader, writer_eval)
+                evaluate(hps, net_g, eval_loader, writer_eval, ssl2wav_model)
                 utils.save_checkpoint(net_g, optim_g, hps.train.learning_rate, epoch,
                                       os.path.join(hps.model_dir, "G_{}.pth".format(global_step)))
-                utils.save_checkpoint(net_d, optim_d, hps.train.learning_rate, epoch,
-                                      os.path.join(hps.model_dir, "D_{}.pth".format(global_step)))
                 keep_ckpts = getattr(hps.train, 'keep_ckpts', 0)
                 if keep_ckpts > 0:
                     utils.clean_checkpoints(path_to_models=hps.model_dir, n_ckpts_to_keep=keep_ckpts, sort_by_time=True)
@@ -255,65 +206,37 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
         logger.info('====> Epoch: {}'.format(epoch))
 
 
-def evaluate(hps, generator, eval_loader, writer_eval):
+def evaluate(hps, generator, eval_loader, writer_eval, ssl2wav_model):
     generator.eval()
     image_dict = {}
     audio_dict = {}
     with torch.no_grad():
-        for batch_idx, (x, x_lengths,lang, spec, spec_lengths, y, y_lengths, speakers, emo) in enumerate(eval_loader):
+        for batch_idx,  (x, x_lengths,lang, ssl_content, ssl_lengths, speakers) in enumerate(eval_loader):
             x, x_lengths = x.cuda(0), x_lengths.cuda(0)
-            spec, spec_lengths = spec.cuda(0), spec_lengths.cuda(0)
-            y, y_lengths = y.cuda(0), y_lengths.cuda(0)
+            ssl_content, ssl_lengths = ssl_content.cuda(0), ssl_lengths.cuda(0)
             speakers = speakers.cuda(0)
             lang = lang.cuda(0)
-            emo = emo.cuda(0)
 
             # remove else
             x = x[:1]
             x_lengths = x_lengths[:1]
-            spec = spec[:1]
-            spec_lengths = spec_lengths[:1]
-            y = y[:1]
-            y_lengths = y_lengths[:1]
+            ssl_content = ssl_content[:1]
+            ssl_lengths = ssl_lengths[:1]
             speakers = speakers[:1]
-            emo = emo[:1]
 
-            y_hat, attn, mask, *_ = generator.module.infer(x, x_lengths, lang, emo=emo, max_len=1000,sid=speakers)
-            y_hat_lengths = mask.sum([1, 2]).long() * hps.data.hop_length
+            ssl_pred, attn, mask, *_ = generator.module.infer(x, x_lengths, lang, max_len=1000,sid=speakers)
 
-            mel = spec_to_mel_torch(
-                spec,
-                hps.data.filter_length,
-                hps.data.n_mel_channels,
-                hps.data.sampling_rate,
-                hps.data.mel_fmin,
-                hps.data.mel_fmax)
-            y_hat_mel = mel_spectrogram_torch(
-                y_hat.squeeze(1).float(),
-                hps.data.filter_length,
-                hps.data.n_mel_channels,
-                hps.data.sampling_rate,
-                hps.data.hop_length,
-                hps.data.win_length,
-                hps.data.mel_fmin,
-                hps.data.mel_fmax
-            )
-            image_dict.update({
-                f"gen/mel_{batch_idx}": utils.plot_spectrogram_to_numpy(y_hat_mel[0].cpu().numpy())
-            })
+            # image_dict.update({
+            #     f"gen/mel_{batch_idx}": utils.plot_spectrogram_to_numpy(y_hat_mel[0].cpu().numpy())
+            # })
+            y_hat = ssl2wav.ssl2wav(hps.data.ssl2wav_model_name, ssl2wav_model, ssl_pred, speakers)
             audio_dict.update({
-                f"gen/audio_{batch_idx}": y_hat[0, :, :y_hat_lengths[0]]
+                f"gen/audio_{batch_idx}": y_hat
             })
-            image_dict.update({f"gt/mel_{batch_idx}": utils.plot_spectrogram_to_numpy(mel[0].cpu().numpy())})
-            audio_dict.update({f"gt/audio_{batch_idx}": y[0, :, :y_lengths[0]]})
-        for sid in [0,1,25]:
-            speakers[:]=sid
-            y_hat, attn, mask, *_ = generator.module.infer(x, x_lengths, lang, max_len=1000, sid=speakers)
-            y_hat_lengths = mask.sum([1, 2]).long() * hps.data.hop_length
+            y_rec = ssl2wav.ssl2wav(hps.data.ssl2wav_model_name, ssl2wav_model, ssl_content, speakers)
+            # image_dict.update({f"gt/mel_{batch_idx}": utils.plot_spectrogram_to_numpy(mel[0].cpu().numpy())})
+            audio_dict.update({f"rec/audio_{batch_idx}": y_rec})
 
-            audio_dict.update({
-                f"gen/audio_{sid}_pred_gst": y_hat[0, :, :y_hat_lengths[0]]
-            })
 
     utils.summarize(
         writer=writer_eval,
