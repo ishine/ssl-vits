@@ -17,6 +17,7 @@ text -> ssl units modeling:
 ssl units -> wav:
 + using [rvc](https://github.com/liujing04/Retrieval-based-Voice-Conversion-WebUI) based on vits
 
+![](resources/structure.png)
 ## References
 + [vits](https://github.com/jaywalnut310/vits)
 + [contentvec](https://github.com/auspicious3000/contentvec)
