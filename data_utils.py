@@ -6,6 +6,7 @@ import librosa
 import numpy as np
 import torch
 import torch.utils.data
+import torch.nn.functional as F
 
 import commons
 from mel_processing import spectrogram_torch
@@ -180,10 +181,10 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
         self.hop_length = hparams.hop_length
         self.win_length = hparams.win_length
         self.sampling_rate = hparams.sampling_rate
-        self.ssl_type = hparams.ssl_type
+        self.preprocessed_wav_path = hparams.preprocessed_wav_path
+        self.ssl_path = hparams.ssl_type
         self.cleaned_text = getattr(hparams, "cleaned_text", False)
 
-        self.add_blank = hparams.add_blank
         self.min_text_len = getattr(hparams, "min_text_len", 1)
         self.max_text_len = getattr(hparams, "max_text_len", 190)
         self.spk_map = hparams.spk2id
@@ -201,28 +202,42 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
 
         audiopaths_sid_text_new = []
         lengths = []
-        for utt_name, sid, text, lang in self.audiopaths_sid_text:
-            ssl_path = f"dataset/{self.ssl_type}/{sid}/{utt_name}.pt"
-            if not os.path.exists(ssl_path):
-                print(ssl_path, "not exist!")
+        for utt_name, spk in self.audiopaths_sid_text:
+            wav_path = f"dataset/{self.preprocessed_wav_path}/{spk}/{utt_name}.wav"
+            ssl_path = f"dataset/{self.ssl_path}/{spk}/{utt_name}.pt"
+            if not os.path.exists(wav_path):
+                print(wav_path, "not exist!")
                 continue
-            # if librosa.get_duration(filename=audiopath)>10:
-            #     print("音频过长，跳过", audiopath)
-            #     continue
-            if self.min_text_len <= len(text) and len(text) <= self.max_text_len:
-                audiopaths_sid_text_new.append([ssl_path, sid, text, lang])
-                length = torch.load(ssl_path).shape[-1]
-                lengths.append(length)
+            if librosa.get_duration(filename=wav_path)>10:
+                print("音频过长", wav_path)
+                continue
+            if librosa.get_duration(filename=wav_path)<0.4:
+                print("音频过短", wav_path)
+                continue
+            audiopaths_sid_text_new.append([wav_path,ssl_path, spk])
+            lengths.append(os.path.getsize(wav_path) // (2 * self.hop_length))
 
         self.audiopaths_sid_text = audiopaths_sid_text_new
         self.lengths = lengths
 
     def get_audio_text_speaker_pair(self, audiopath_sid_text):
-        ssl_path, sid, text, lang = audiopath_sid_text[0], audiopath_sid_text[1], audiopath_sid_text[2], audiopath_sid_text[3]
-        text, lang = self.get_text(text, lang)
+        wav_path,ssl_path, spk = audiopath_sid_text
+        spec, audio_norm = self.get_audio(wav_path)
         ssl_content = torch.load(ssl_path)
-        sid = self.get_sid(sid)
-        return (text, ssl_content, sid, lang)
+        ssl_content = F.interpolate(ssl_content, scale_factor=2)
+
+        spec_len = spec.shape[1]
+        ssl_len = ssl_content.shape[-1]
+        tgt_len = min(ssl_len, spec_len)
+        assert abs(tgt_len-ssl_len)<3
+        assert abs(tgt_len-spec_len)<3
+        spec = spec[:, :tgt_len]
+        ssl_content = ssl_content[:, :, :tgt_len]
+        audio_norm = audio_norm[:, :tgt_len*self.hop_length]
+
+
+        sid = self.get_sid(spk)
+        return (ssl_content, spec, audio_norm , sid)
 
     def get_audio(self, filename):
         audio, sampling_rate = load_wav_to_torch(filename)
@@ -278,41 +293,48 @@ class TextAudioSpeakerCollate():
         """
         # Right zero-pad all one-hot text sequences to max input length
         _, ids_sorted_decreasing = torch.sort(
-            torch.LongTensor([x[1].size(-1) for x in batch]),
+            torch.LongTensor([x[1].size(1) for x in batch]),
             dim=0, descending=True)
 
-        max_text_len = max([len(x[0]) for x in batch])
-        max_ssl_len = max([x[1].size(-1) for x in batch])
+        max_text_len = max([x[0].size(-1)for x in batch])
+        max_spec_len = max([x[1].size(1) for x in batch])
+        max_wav_len = max([x[2].size(1) for x in batch])
 
         text_lengths = torch.LongTensor(len(batch))
-        ssl_lengths = torch.LongTensor(len(batch))
+        spec_lengths = torch.LongTensor(len(batch))
+        wav_lengths = torch.LongTensor(len(batch))
         sid = torch.LongTensor(len(batch))
 
-        text_padded = torch.LongTensor(len(batch), max_text_len)
-        lang_padded = torch.LongTensor(len(batch), max_text_len)
-        ssl_padded = torch.FloatTensor(len(batch), batch[0][1].size(1), max_ssl_len)
+        text_padded = torch.FloatTensor(len(batch), batch[0][0].size(1), max_text_len)
+        # lang_padded = torch.LongTensor(len(batch), max_text_len)
+        spec_padded = torch.FloatTensor(len(batch), batch[0][1].size(0), max_spec_len)
+        wav_padded = torch.FloatTensor(len(batch), 1, max_wav_len)
         text_padded.zero_()
-        lang_padded.zero_()
-        ssl_padded.zero_()
+        # lang_padded.zero_()
+        spec_padded.zero_()
+        wav_padded.zero_()
 
         for i in range(len(ids_sorted_decreasing)):
             row = batch[ids_sorted_decreasing[i]]
 
             text = row[0]
-            text_padded[i, :text.size(0)] = text
-            text_lengths[i] = text.size(0)
+            text_padded[i, :, :text.size(-1)] = text[0, :, :]
+            text_lengths[i] = text.size(-1)
 
-            ssl = row[1]
-            ssl_padded[i, :, :ssl.size(-1)] = ssl[0, :, :]
-            ssl_lengths[i] = ssl.size(-1)
+            spec = row[1]
+            spec_padded[i, :, :spec.size(1)] = spec
+            spec_lengths[i] = spec.size(1)
 
-            sid[i] = row[2]
+            wav = row[2]
+            wav_padded[i, :, :wav.size(1)] = wav
+            wav_lengths[i] = wav.size(1)
 
-            lang = row[3]
-            lang_padded[i, :lang.size(0)] = lang
+            sid[i] = row[3]
 
+            # lang = row[4]
+            # lang_padded[i, :lang.size(0)] = lang
 
-        return text_padded, text_lengths,lang_padded, ssl_padded, ssl_lengths, sid
+        return text_padded.transpose(1,2), text_lengths, spec_padded, spec_lengths, wav_padded, wav_lengths, sid
 
 
 class DistributedBucketSampler(torch.utils.data.distributed.DistributedSampler):

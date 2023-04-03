@@ -26,7 +26,7 @@ from data_utils import (
     DistributedBucketSampler
 )
 from models import (
-    SynthesizerTrn,
+    SynthesizerTrnMs256NSFsid_nono,
     MultiPeriodDiscriminator,
 )
 from losses import (
@@ -84,12 +84,11 @@ def run(rank, n_gpus, hps):
                                  batch_size=1, pin_memory=True,
                                  drop_last=False, collate_fn=collate_fn)
 
-    net_g = SynthesizerTrn(
-        len(symbols),
-        hps.data.filter_length // 2 + 1,
-        hps.train.segment_size // hps.data.hop_length,
-        n_speakers=hps.data.n_speakers,
-        **hps.model).cuda(rank)
+    net_g = SynthesizerTrnMs256NSFsid_nono(hps.data.filter_length // 2 + 1,
+               hps.train.segment_size // hps.data.hop_length,
+               **hps.model,
+               is_half=hps.train.fp16_run).cuda(rank)
+
     net_d = MultiPeriodDiscriminator(hps.model.use_spectral_norm).cuda(rank)
     optim_g = torch.optim.AdamW(
         net_g.parameters(),
@@ -149,17 +148,15 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
 
     net_g.train()
     net_d.train()
-    for batch_idx, (x, x_lengths,lang, spec, spec_lengths, y, y_lengths, speakers, emo) in enumerate(train_loader):
+    for batch_idx, (x, x_lengths, spec, spec_lengths, y, y_lengths, speakers) in enumerate(train_loader):
         x, x_lengths = x.cuda(rank, non_blocking=True), x_lengths.cuda(rank, non_blocking=True)
         spec, spec_lengths = spec.cuda(rank, non_blocking=True), spec_lengths.cuda(rank, non_blocking=True)
         y, y_lengths = y.cuda(rank, non_blocking=True), y_lengths.cuda(rank, non_blocking=True)
         speakers = speakers.cuda(rank, non_blocking=True)
-        lang = lang.cuda(rank, non_blocking=True)
-        emo = emo.cuda(rank, non_blocking=True)
 
         with autocast(enabled=hps.train.fp16_run):
-            y_hat, l_length, attn, ids_slice, x_mask, z_mask, \
-            (z, z_p, m_p, logs_p, m_q, logs_q), gst_predict_loss= net_g(x, x_lengths, lang, spec, spec_lengths, speakers, emo)
+            y_hat, ids_slice, x_mask, z_mask, \
+            (z, z_p, m_p, logs_p, m_q, logs_q) = net_g(x, x_lengths, spec, spec_lengths, speakers)
 
             mel = spec_to_mel_torch(
                 spec,
@@ -197,13 +194,12 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
             # Generator
             y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = net_d(y, y_hat)
             with autocast(enabled=False):
-                loss_dur = torch.sum(l_length.float())
                 loss_mel = F.l1_loss(y_mel, y_hat_mel) * hps.train.c_mel
                 loss_kl = kl_loss(z_p, logs_q, m_p, logs_p, z_mask) * hps.train.c_kl
 
                 loss_fm = feature_loss(fmap_r, fmap_g)
                 loss_gen, losses_gen = generator_loss(y_d_hat_g)
-                loss_gen_all = loss_gen + loss_fm + loss_mel + loss_dur + loss_kl + gst_predict_loss
+                loss_gen_all = loss_gen + loss_fm + loss_mel + loss_kl
         optim_g.zero_grad()
         scaler.scale(loss_gen_all).backward()
         scaler.unscale_(optim_g)
@@ -214,7 +210,7 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
         if rank == 0:
             if global_step % hps.train.log_interval == 0:
                 lr = optim_g.param_groups[0]['lr']
-                losses = [loss_disc, loss_gen, loss_fm, loss_mel, loss_dur, loss_kl]
+                losses = [loss_disc, loss_gen, loss_fm, loss_mel, loss_kl]
                 logger.info('Train Epoch: {} [{:.0f}%]'.format(
                     epoch,
                     100. * batch_idx / len(train_loader)))
@@ -223,15 +219,14 @@ def train_and_evaluate(rank, epoch, hps, nets, optims, schedulers, scaler, loade
                 scalar_dict = {"loss/g/total": loss_gen_all, "loss/d/total": loss_disc_all, "learning_rate": lr,
                                "grad_norm_d": grad_norm_d, "grad_norm_g": grad_norm_g}
                 scalar_dict.update(
-                    {"loss/g/fm": loss_fm, "loss/g/mel": loss_mel, "loss/g/dur": loss_dur,
-                     "loss/g/kl": loss_kl, "loss/g/gst_predict_loss": gst_predict_loss})
+                    {"loss/g/fm": loss_fm, "loss/g/mel": loss_mel,
+                     "loss/g/kl": loss_kl})
 
 
                 image_dict = {
                     "slice/mel_org": utils.plot_spectrogram_to_numpy(y_mel[0].data.cpu().numpy()),
                     "slice/mel_gen": utils.plot_spectrogram_to_numpy(y_hat_mel[0].data.cpu().numpy()),
-                    "all/mel": utils.plot_spectrogram_to_numpy(mel[0].data.cpu().numpy()),
-                    "all/attn": utils.plot_alignment_to_numpy(attn[0, 0].data.cpu().numpy())
+                    "all/mel": utils.plot_spectrogram_to_numpy(mel[0].data.cpu().numpy())
                 }
                 utils.summarize(
                     writer=writer,
@@ -260,13 +255,12 @@ def evaluate(hps, generator, eval_loader, writer_eval):
     image_dict = {}
     audio_dict = {}
     with torch.no_grad():
-        for batch_idx, (x, x_lengths,lang, spec, spec_lengths, y, y_lengths, speakers, emo) in enumerate(eval_loader):
+        for batch_idx, (x, x_lengths, spec, spec_lengths, y, y_lengths, speakers) in enumerate(eval_loader):
             x, x_lengths = x.cuda(0), x_lengths.cuda(0)
             spec, spec_lengths = spec.cuda(0), spec_lengths.cuda(0)
             y, y_lengths = y.cuda(0), y_lengths.cuda(0)
             speakers = speakers.cuda(0)
-            lang = lang.cuda(0)
-            emo = emo.cuda(0)
+            # lang = lang.cuda(0)
 
             # remove else
             x = x[:1]
@@ -276,9 +270,8 @@ def evaluate(hps, generator, eval_loader, writer_eval):
             y = y[:1]
             y_lengths = y_lengths[:1]
             speakers = speakers[:1]
-            emo = emo[:1]
 
-            y_hat, attn, mask, *_ = generator.module.infer(x, x_lengths, lang, emo=emo, max_len=1000,sid=speakers)
+            y_hat, mask, *_ = generator.module.infer(x, x_lengths, sid=speakers)
             y_hat_lengths = mask.sum([1, 2]).long() * hps.data.hop_length
 
             mel = spec_to_mel_torch(
@@ -306,14 +299,6 @@ def evaluate(hps, generator, eval_loader, writer_eval):
             })
             image_dict.update({f"gt/mel_{batch_idx}": utils.plot_spectrogram_to_numpy(mel[0].cpu().numpy())})
             audio_dict.update({f"gt/audio_{batch_idx}": y[0, :, :y_lengths[0]]})
-        for sid in [0,1,25]:
-            speakers[:]=sid
-            y_hat, attn, mask, *_ = generator.module.infer(x, x_lengths, lang, max_len=1000, sid=speakers)
-            y_hat_lengths = mask.sum([1, 2]).long() * hps.data.hop_length
-
-            audio_dict.update({
-                f"gen/audio_{sid}_pred_gst": y_hat[0, :, :y_hat_lengths[0]]
-            })
 
     utils.summarize(
         writer=writer_eval,

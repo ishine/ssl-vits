@@ -3,6 +3,8 @@ import argparse
 import librosa
 import numpy as np
 from multiprocessing import Pool, cpu_count
+
+import soundfile
 from scipy.io import wavfile
 from tqdm import tqdm
 
@@ -14,19 +16,11 @@ def process(item):
     wav_path = os.path.join(args.in_dir, speaker, wav_name)
     if os.path.exists(wav_path) and '.wav' in wav_path:
         os.makedirs(os.path.join(args.out_dir2, speaker), exist_ok=True)
-        wav, sr = librosa.load(wav_path, sr=None)
-        wav, _ = librosa.effects.trim(wav, top_db=20)
-        peak = np.abs(wav).max()
-        if peak > 1.0:
-            wav = 0.98 * wav / peak
-        wav2 = librosa.resample(wav, orig_sr=sr, target_sr=args.sr2)
-        wav2 /= max(wav2.max(), -wav2.min())
-        save_name = wav_name
-        save_path2 = os.path.join(args.out_dir2, speaker, save_name)
-        wavfile.write(
-            save_path2,
-            args.sr2,
-            (wav2 * np.iinfo(np.int16).max).astype(np.int16)
+        wav, sr = librosa.load(wav_path, sr=args.sr2)
+        soundfile.write(
+            os.path.join(args.out_dir2, speaker, wav_name),
+            wav,
+            sr
         )
 
 
