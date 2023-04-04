@@ -16,8 +16,8 @@
     "segment_size": 16384,
     "init_lr_ratio": 1,
     "warmup_epochs": 0,
-    "c_ssl": 45,
-    "c_kl": 1.0,
+    "c_ssl": 432,
+    "c_kl": 0.5,
     "keep_ckpts": 3
   },
   "data": {
@@ -58,7 +58,7 @@
       "SSB0415": 24
     },
     "ssl2wav_model_name": "rvc_32k",
-    "ssl_type": "contentvec2"
+    "ssl_type": "chinece_hubert"
   },
   "model": {
     "inter_channels": 192,

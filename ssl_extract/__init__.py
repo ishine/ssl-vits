@@ -1,8 +1,9 @@
-from . import contentvec, contentvec2
+from . import contentvec, contentvec2, chinece_hubert
 
 ssl_map = {
     "contentvec": contentvec,
-    "contentvec2": contentvec2
+    "contentvec2": contentvec2,
+    "chinece_hubert": chinece_hubert
 }
 
 def get_ssl_model(ssl_type):
