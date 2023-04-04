@@ -16,7 +16,7 @@
     "segment_size": 16384,
     "init_lr_ratio": 1,
     "warmup_epochs": 0,
-    "c_ssl": 90,
+    "c_ssl": 45,
     "c_kl": 1.0,
     "keep_ckpts": 3
   },
@@ -109,5 +109,5 @@
     "gin_channels": 512,
     "ssl_channels": 256
   },
-  "model_dir": "./logdir/cjke"
+  "model_dir": "./logdir/text2ssl"
 }
