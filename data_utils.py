@@ -223,7 +223,7 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
     def get_audio_text_speaker_pair(self, audiopath_sid_text):
         wav_path,ssl_path, spk = audiopath_sid_text
         spec, audio_norm = self.get_audio(wav_path)
-        ssl_content = torch.load(ssl_path)
+        ssl_content = torch.load(ssl_path).detach()
         ssl_content = F.interpolate(ssl_content, scale_factor=2)
 
         spec_len = spec.shape[1]

@@ -58,7 +58,7 @@
       "SSB0415": 24
     },
     "ssl2wav_model_name": "rvc_32k",
-    "ssl_type": "contentvec"
+    "ssl_type": "contentvec2"
   },
   "model": {
     "inter_channels": 192,
@@ -107,7 +107,7 @@
     "n_layers_q": 3,
     "use_spectral_norm": false,
     "gin_channels": 512,
-    "ssl_channels": 256
+    "ssl_channels": 768
   },
   "model_dir": "./logdir/text2ssl"
 }

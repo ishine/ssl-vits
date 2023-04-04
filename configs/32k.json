@@ -52,7 +52,7 @@
       "SSB0668": 23,
       "SSB0415": 24
     },
-    "ssl_type": "contentvec"
+    "ssl_type": "contentvec2"
   },
   "model": {
     "inter_channels": 192,
@@ -70,7 +70,8 @@
     "upsample_kernel_sizes": [16,16,4,4,4],
     "use_spectral_norm": false,
     "gin_channels": 256,
-    "spk_embed_dim": 109
+    "spk_embed_dim": 109,
+    "ssl_channels": 768
   },
   "model_dir": "./logdir/ssl2wav"
 

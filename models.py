@@ -180,7 +180,7 @@ class TextEncoder(nn.Module):
 
 class TextEncoder256(nn.Module):
     def __init__(
-            self, out_channels, hidden_channels, filter_channels, n_heads, n_layers, kernel_size, p_dropout, f0=True):
+            self, ssl_channels, out_channels, hidden_channels, filter_channels, n_heads, n_layers, kernel_size, p_dropout, f0=True):
         super().__init__()
         self.out_channels = out_channels
         self.hidden_channels = hidden_channels
@@ -189,7 +189,7 @@ class TextEncoder256(nn.Module):
         self.n_layers = n_layers
         self.kernel_size = kernel_size
         self.p_dropout = p_dropout
-        self.emb_phone = nn.Linear(256, hidden_channels)
+        self.emb_phone = nn.Linear(ssl_channels, hidden_channels)
         self.lrelu = nn.LeakyReLU(0.1, inplace=True)
         if (f0 == True):
             self.emb_pitch = nn.Embedding(256, hidden_channels)  # pitch 256
@@ -631,6 +631,7 @@ class SynthesizerTrnMs256NSFsid_nono(nn.Module):
             upsample_kernel_sizes,
             spk_embed_dim,
             gin_channels,
+            ssl_channels,
             sr=None,
             **kwargs
     ):
@@ -654,6 +655,7 @@ class SynthesizerTrnMs256NSFsid_nono(nn.Module):
         # self.hop_length = hop_length#
         self.spk_embed_dim = spk_embed_dim
         self.enc_p = TextEncoder256(
+            ssl_channels,
             inter_channels,
             hidden_channels,
             filter_channels,
