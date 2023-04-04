@@ -210,11 +210,11 @@ def evaluate(hps, generator, eval_loader, writer_eval, ssl2wav_model, train_rec)
     image_dict = {}
     audio_dict = {}
     with torch.no_grad():
-        y_train_rec, sr = ssl2wav.ssl2wav(hps.data.ssl2wav_model_name, ssl2wav_model, train_rec.detach()[:1, :, :],
-                                          None)
-        audio_dict.update({
-            f"gen/audio_tr_rec": y_train_rec
-        })
+        # y_train_rec, sr = ssl2wav.ssl2wav(hps.data.ssl2wav_model_name, ssl2wav_model, train_rec.detach()[:1, :, :],
+        #                                   None)
+        # audio_dict.update({
+        #     f"gen/audio_tr_rec": y_train_rec
+        # })
         for batch_idx,  (x, x_lengths,lang, ssl_content, ssl_lengths, speakers) in enumerate(eval_loader):
             x, x_lengths = x.cuda(0), x_lengths.cuda(0)
             ssl_content, ssl_lengths = ssl_content.cuda(0), ssl_lengths.cuda(0)

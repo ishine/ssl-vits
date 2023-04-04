@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 ssl_type = "contentvec"
 hps = utils.get_hparams_from_file("./configs/32k.json")
-pth = "pretrained/G32k.pth"
+pth = "pretrained/G_56000.pth"
 tgt_sid = 11
 
 def get_model():
@@ -26,7 +26,7 @@ def ssl2wav(model, ssl_content, sid):
     """
     feats = F.interpolate(ssl_content, scale_factor=2).permute(0, 2, 1)
     phone_lengths = torch.LongTensor([feats.size(1)]).to(feats.device)
-    sid = torch.LongTensor([tgt_sid]).to(feats.device)
+    # sid = torch.LongTensor([tgt_sid]).to(feats.device)
     audio = model.infer(feats, phone_lengths, sid)[0][0, 0].data.cpu().float().numpy()
     return audio, hps.data.sampling_rate
 
