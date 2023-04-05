@@ -8,8 +8,8 @@ import torch
 import torch.utils.data
 import torch.nn.functional as F
 
-import commons
-from mel_processing import spectrogram_torch
+from module import commons
+from module.mel_processing import spectrogram_torch
 from utils import load_wav_to_torch, load_filepaths_and_text
 from text import cleaned_text_to_sequence
 

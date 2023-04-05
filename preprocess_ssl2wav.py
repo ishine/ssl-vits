@@ -10,7 +10,7 @@ import torch
 from glob import glob
 from tqdm import tqdm
 
-import ssl_extract
+import wav2ssl
 import utils
 import logging
 
@@ -38,7 +38,7 @@ def process_one(file_path, model):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         wav16k, sr = librosa.load(path, sr=16000)
         wav16k = torch.from_numpy(wav16k).to(device)
-        ssl_content = ssl_extract.get_ssl_content(hps.data.ssl_type, model, wav_16k_tensor=wav16k)
+        ssl_content = wav2ssl.get_ssl_content(hps.data.ssl_type, model, wav_16k_tensor=wav16k)
         torch.save(ssl_content.cpu(), ssl_path)
     if not os.path.exists(wav_path):
         wav, sr = librosa.load(path, sr=hps.data.sampling_rate)
@@ -48,7 +48,7 @@ def process_one(file_path, model):
 def process_batch(filenames):
     print("Loading hubert for content...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    ssl_model = ssl_extract.get_ssl_model(hps.data.ssl_type).to(device)
+    ssl_model = wav2ssl.get_ssl_model(hps.data.ssl_type).to(device)
     print("Loaded hubert.")
     for filename in tqdm(filenames):
         process_one(filename, ssl_model)
