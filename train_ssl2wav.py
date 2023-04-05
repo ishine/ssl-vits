@@ -18,7 +18,7 @@ import logging
 
 logging.getLogger('numba').setLevel(logging.WARNING)
 
-import commons
+from module import commons
 import utils
 from data_utils import (
     TextAudioSpeakerLoader,
@@ -29,13 +29,13 @@ from models import (
     SynthesizerTrnMs256NSFsid_nono,
     MultiPeriodDiscriminator,
 )
-from losses import (
+from module.losses import (
     generator_loss,
     discriminator_loss,
     feature_loss,
     kl_loss
 )
-from mel_processing import mel_spectrogram_torch, spec_to_mel_torch
+from module.mel_processing import mel_spectrogram_torch, spec_to_mel_torch
 from text.symbols import symbols
 
 torch.backends.cudnn.benchmark = True
